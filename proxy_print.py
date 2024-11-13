@@ -2,6 +2,7 @@ import requests
 from PIL import Image
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
+from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 from io import BytesIO
 import os
@@ -38,11 +39,15 @@ def parse_deck_line(line):
         card_names = [name.strip() for name in match.group(2).split('//')]
         set_code = match.group(3)
         collector_number = match.group(4)
-        return quantity, card_names, set_code, collector_number
+        
+        # For double-faced cards, create tuple pairs of (front, back)
+        if len(card_names) > 1:
+            return quantity, (card_names[0], card_names[1]), set_code, collector_number
+        return quantity, (card_names[0], None), set_code, collector_number
     return None
 
 
-def fetch_card_image(card_name, set_code=None, collector_number=None, quality='png'):
+def fetch_card_image(card_name, set_code=None, collector_number=None, quality='large'):
     card_image_path = os.path.join('images', f"{card_name}.png")
     
     if os.path.exists(card_image_path):
@@ -84,44 +89,70 @@ def fetch_card_image(card_name, set_code=None, collector_number=None, quality='p
     return card_image
 
 
+def draw_cut_lines(pdf_canvas, margin_x, margin_y, card_width, card_height):
+    
+    # Vertical lines
+    for i in range(4):
+        x = margin_x + (i * card_width)
+        pdf_canvas.setStrokeColor(colors.black)
+        pdf_canvas.setDash(1, 2)  # Dashed line pattern
+        pdf_canvas.line(x, 0, x, 297*mm)
+
+    # Horizontal lines
+    for i in range(4):
+        y = margin_y + (i * card_height)
+        pdf_canvas.line(0, y, 210*mm, y)
+
+
 # Function to create a 3x3 PDF page with card images
-def create_pdf(card_names, output_filename="mtg_proxies.pdf"):
-    from reportlab.lib.units import mm
+def create_pdf(cards_to_print, output_filename="mtg_proxies.pdf"):
 
-    pdf_canvas = canvas.Canvas(output_filename, pagesize=(210*mm, 297*mm))  # A4 size
-    card_width, card_height = 63.5*mm, 88.9*mm  # Exact MTG card dimensions
-
+    pdf_canvas = canvas.Canvas(output_filename, pagesize=(210*mm, 297*mm))
+    card_width, card_height = 63.5*mm, 88.9*mm
     margin_x = (210*mm - (3 * card_width)) / 2
     margin_y = (297*mm - (3 * card_height)) / 2
+    cards_per_page = 9
 
-    for index, card_name in enumerate(card_names):
-        # Start new page and reset position counter after placing 9 cards
-        if index > 0 and index % 9 == 0:
-            pdf_canvas.showPage()
+    # Check if we have any double-faced cards
+    has_double_faced = any(back for _, back in cards_to_print if back is not None)
+    
+    # Process cards in page groups
+    for page_start in range(0, len(cards_to_print), cards_per_page):
+        page_cards = cards_to_print[page_start:page_start + cards_per_page]
+        
+        # Process front faces
+        for idx, (front, _) in enumerate(page_cards):
+            x_pos = margin_x + (idx % 3) * card_width
+            y_pos = 297*mm - (margin_y + ((idx // 3 + 1) * card_height))
             
-        page_index = index % 9
-        x_position = margin_x + (page_index % 3) * card_width
-        y_position = 297*mm - (margin_y + ((page_index // 3 + 1) * card_height))
+            card_image = fetch_card_image(front)
+            if card_image:
+                image_path = os.path.join('images', f"{front}.png")
+                card_image.save(image_path)
+                pdf_canvas.drawImage(image_path, x_pos, y_pos, width=card_width, height=card_height)
+        
+        # Add cut lines only on front-facing pages
+        draw_cut_lines(pdf_canvas, margin_x, margin_y, card_width, card_height)
+        pdf_canvas.showPage()
 
-        card_image = fetch_card_image(card_name)
-        if card_image:
-            image_path = os.path.join('images', f"{card_name}.png")
-            card_image.save(image_path)
-            pdf_canvas.drawImage(image_path, x_position, y_position, width=card_width, height=card_height)
-
-        # "Cut lines"
-        if page_index % 9 == 8 or index == len(card_names) - 1:
-            # Vertical lines
-            for i in range(4):
-                x = margin_x + (i * card_width)
-                pdf_canvas.setStrokeColor(colors.black)
-                pdf_canvas.setDash(1, 2)
-                pdf_canvas.line(x, 0, x, 297*mm)
-
-            # Horizontal lines
-            for i in range(4):
-                y = margin_y + (i * card_height)
-                pdf_canvas.line(0, y, 210*mm, y)
+        # If we have double-faced cards, process backs on the next page
+        if has_double_faced:
+            # Add backs in mirrored positions
+            for idx, (_, back) in enumerate(page_cards):
+                if back:
+                    # Mirror the position for proper back alignment
+                    mirrored_idx = (idx // 3) * 3 + (2 - (idx % 3))
+                    x_pos = margin_x + (mirrored_idx % 3) * card_width
+                    y_pos = 297*mm - (margin_y + ((mirrored_idx // 3 + 1) * card_height))
+                    
+                    card_image = fetch_card_image(back)
+                    if card_image:
+                        image_path = os.path.join('images', f"{back}.png")
+                        card_image.save(image_path)
+                        pdf_canvas.drawImage(image_path, x_pos, y_pos, width=card_width, height=card_height)
+            
+            # No cut lines on back-facing pages
+            pdf_canvas.showPage()
 
     pdf_canvas.save()
     print(f"PDF created: {output_filename}")
@@ -141,10 +172,9 @@ if __name__ == "__main__":
             if line.strip():
                 parsed = parse_deck_line(line)
                 if parsed:
-                    quantity, card_names, set_code, collector_number = parsed
+                    quantity, card_faces, set_code, collector_number = parsed
                     # Add both sides of double-sided cards
                     for _ in range(quantity):
-                        for card_name in card_names:
-                            cards_to_print.append((card_name, set_code, collector_number))
+                        cards_to_print.append(card_faces)
     
-    create_pdf([card[0] for card in cards_to_print])
+    create_pdf(cards_to_print)
