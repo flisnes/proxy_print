@@ -45,7 +45,7 @@ def parse_deck_line(line):
 def fetch_card_image(card_name, set_code=None, collector_number=None, quality='png'):
     card_image_path = os.path.join('images', f"{card_name}.png")
     
-    if not os.path.exists(card_image_path):
+    if os.path.exists(card_image_path):
         card_image = Image.open(card_image_path)
     else:
         if set_code and collector_number:
